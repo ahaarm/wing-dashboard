@@ -216,7 +216,7 @@ function TideCurve({ dateStr }) {
 
 function WindArrow({ deg, size=12 }) {
   return (
-    <div style={{ transform: `rotate(${deg}deg)`, width: size, height: size }}
+    <div style={{ transform: `rotate(${deg + 180}deg)`, width: size, height: size }}
          className="inline-flex items-center justify-center">
       <Navigation2 size={size} className="text-slate-600" strokeWidth={2.5}/>
     </div>
