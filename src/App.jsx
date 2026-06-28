@@ -1,5 +1,5 @@
-import { useState, useEffect, useMemo, useCallback } from "react";
-import { Wind, Waves, Navigation2, AlertTriangle, Loader2, ChevronLeft, ChevronRight, Droplets, Info, X } from "lucide-react";
+import { useState, useEffect, useMemo } from "react";
+import { Wind, Navigation2, AlertTriangle, Loader2, ChevronLeft, ChevronRight, Droplets, X } from "lucide-react";
 
 const KMH_TO_KTS = 1 / 1.852;
 const HOURS = Array.from({ length: 17 }, (_, i) => i + 6);
@@ -7,16 +7,6 @@ const DATES = Array.from({ length: 13 }, (_, i) => {
   const d = new Date(2026, 6, 2 + i);
   return d.toISOString().slice(0, 10);
 });
-
-const PHASES = {
-  "2026-07-02": "transit",
-  "2026-07-03": "crozon", "2026-07-04": "crozon", "2026-07-05": "crozon",
-  "2026-07-06": "crozon", "2026-07-07": "crozon",
-  "2026-07-08": "transit",
-  "2026-07-09": "nord", "2026-07-10": "nord", "2026-07-11": "nord",
-  "2026-07-12": "nord", "2026-07-13": "nord",
-  "2026-07-14": "transit",
-};
 
 const COEFF = {
   "2026-07-02": [71,72], "2026-07-03": [72,71], "2026-07-04": [70,69],
@@ -44,6 +34,9 @@ const SPOTS = [
   { id:"carantec", name:"Carantec", zone:"nord", type:"flat", windGroup:"nord_e",
     windDirs:[[0,360]], tideRule:"always", notes:"Repli safe · baie de Morlaix" },
 ];
+
+const CROZON_SPOTS = SPOTS.filter(s => s.zone === "crozon");
+const NORD_SPOTS = SPOTS.filter(s => s.zone === "nord");
 
 const WIND_GROUPS = {
   crozon:  { lat: 48.2233, lon: -4.5452 },
@@ -146,9 +139,34 @@ async function fetchWind(group, startDate, endDate) {
       speed: data.hourly.wind_speed_10m[i] || 0,
       dir: data.hourly.wind_direction_10m[i] || 0,
       gust: data.hourly.wind_gusts_10m[i] || 0,
+      model: "GFS/ICON",
     };
   });
   return map;
+}
+
+async function fetchWindHD(group, startDate, endDate) {
+  try {
+    const { lat, lon } = WIND_GROUPS[group];
+    const url = `https://api.open-meteo.com/v1/meteofrance?models=arome_france_hd&latitude=${lat}&longitude=${lon}&hourly=wind_speed_10m,wind_direction_10m,wind_gusts_10m&timezone=Europe%2FParis&start_date=${startDate}&end_date=${endDate}`;
+    const res = await fetch(url);
+    if (!res.ok) return {};
+    const data = await res.json();
+    const map = {};
+    data.hourly.time.forEach((t, i) => {
+      if (data.hourly.wind_speed_10m[i] != null) {
+        map[t] = {
+          speed: data.hourly.wind_speed_10m[i],
+          dir: data.hourly.wind_direction_10m[i] || 0,
+          gust: data.hourly.wind_gusts_10m[i] || 0,
+          model: "AROME HD",
+        };
+      }
+    });
+    return map;
+  } catch {
+    return {};
+  }
 }
 
 function TideCurve({ dateStr }) {
@@ -249,6 +267,49 @@ function DetailPanel({ data, spot, onClose }) {
           </div>
         </div>
       </div>
+      {data.model && (
+        <div className="text-[10px] text-slate-400 text-center mt-2">Modèle : {data.model}</div>
+      )}
+    </div>
+  );
+}
+
+function SpotRow({ spot, dayScores, onCellClick }) {
+  return (
+    <div className="flex items-center mb-1 group">
+      <div className="w-20 shrink-0 pr-2 text-right">
+        <div className="text-[11px] font-semibold text-slate-700 leading-tight truncate">{spot.name}</div>
+        <div className="text-[9px] text-slate-400">
+          {spot.type==="wave"?"🌊":spot.type==="flat"?"🟦":"🏖"}
+          {spot.tideRule==="pm"?" PM":spot.tideRule==="bm"?" BM":""}
+        </div>
+      </div>
+      <div className="flex-1 flex gap-px">
+        {dayScores.map((s, i) => (
+          <button key={i}
+            onClick={() => onCellClick(s, spot, i)}
+            className={`flex-1 h-7 rounded-sm transition-all cursor-pointer
+              ${cellColor(s)} ${cellBorder(s)}
+              hover:scale-y-125 hover:z-10 relative`}
+            title={`${HOURS[i]}h: ${s.kts} kts ${s.dir}`}>
+            {s.level === 2 && (
+              <span className="text-[8px] font-bold text-emerald-800 absolute inset-0 flex items-center justify-center">
+                {s.kts}
+              </span>
+            )}
+            {s.level === 1 && (
+              <span className="text-[8px] font-medium text-amber-700 absolute inset-0 flex items-center justify-center">
+                {s.kts}
+              </span>
+            )}
+            {s.level === 0 && s.reason === "wrong_tide" && s.kts >= 10 && (
+              <span className="text-[8px] font-medium text-sky-600 absolute inset-0 flex items-center justify-center">
+                {s.kts}
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -270,12 +331,18 @@ export default function WingDashboard() {
     async function load() {
       try {
         const groups = Object.keys(WIND_GROUPS);
-        const results = await Promise.all(
-          groups.map(g => fetchWind(g, DATES[0], DATES[DATES.length-1]))
-        );
+        const [standard, hd] = await Promise.all([
+          Promise.all(groups.map(g => fetchWind(g, DATES[0], DATES[DATES.length-1]))),
+          Promise.all(groups.map(g => fetchWindHD(g, DATES[0], DATES[DATES.length-1]))),
+        ]);
         if (cancelled) return;
         const map = {};
-        groups.forEach((g, i) => { map[g] = results[i]; });
+        groups.forEach((g, i) => {
+          map[g] = { ...standard[i] };
+          Object.entries(hd[i]).forEach(([key, val]) => {
+            map[g][key] = val;
+          });
+        });
         setWind(map);
       } catch (e) {
         if (!cancelled) setError(e.message);
@@ -300,7 +367,7 @@ export default function WingDashboard() {
           const tide = getTide(ts);
           if (!w) return { level: -1, reason: "no_data", kts:0, gustKts:0, dir:"?", tide };
           const s = score(spot, w.speed, w.dir, w.gust, tide);
-          return { ...s, tide, hour: h };
+          return { ...s, tide, hour: h, model: w.model };
         });
       });
     });
@@ -311,12 +378,8 @@ export default function WingDashboard() {
     if (!scores) return {};
     const result = {};
     DATES.forEach(date => {
-      const phase = PHASES[date];
-      const relevantSpots = SPOTS.filter(s =>
-        phase === "transit" ? true : s.zone === phase || s.zone === "both"
-      );
       let best = [];
-      relevantSpots.forEach(spot => {
+      SPOTS.forEach(spot => {
         const dayScores = scores[date][spot.id];
         const goHours = dayScores.filter(s => s.level === 2).map(s => s.hour);
         if (goHours.length > 0) {
@@ -324,28 +387,33 @@ export default function WingDashboard() {
             const idx = h - 6;
             return sum + (dayScores[idx]?.kts || 0);
           }, 0) / goHours.length);
-          best.push({ spot: spot.name, hours: goHours, avgKts, type: spot.type });
+          best.push({ spot: spot.name, zone: spot.zone, hours: goHours, avgKts, type: spot.type });
         }
       });
       best.sort((a, b) => b.hours.length - a.hours.length);
-      result[date] = best.slice(0, 3);
+      result[date] = best.slice(0, 4);
     });
     return result;
   }, [scores]);
 
-  const phase = PHASES[selDate];
   const dayCoeff = COEFF[selDate] || [0,0];
   const dayLabel = new Date(selDate + "T12:00:00").toLocaleDateString("fr-FR", { weekday: "short", day: "numeric", month: "short" });
+
+  const dayModel = useMemo(() => {
+    if (!scores) return null;
+    const firstSpot = SPOTS[0];
+    const dayScores = scores[selDate]?.[firstSpot.id] || [];
+    const models = dayScores.map(s => s.model).filter(Boolean);
+    if (models.includes("AROME HD")) return "AROME HD 1.5 km";
+    return "GFS/ICON";
+  }, [scores, selDate]);
 
   const prevDate = () => { const i = DATES.indexOf(selDate); if (i > 0) { setSelDate(DATES[i-1]); setDetail(null); }};
   const nextDate = () => { const i = DATES.indexOf(selDate); if (i < DATES.length-1) { setSelDate(DATES[i+1]); setDetail(null); }};
 
-  const spotRows = SPOTS.filter(s => {
-    if (phase === "transit") return true;
-    return s.zone === phase;
-  });
-
-  const otherSpots = SPOTS.filter(s => !spotRows.includes(s) && phase !== "transit");
+  const handleCellClick = (s, spot, i) => {
+    setDetail({ score: s, spot, hour: HOURS[i], tide: s.tide, model: s.model });
+  };
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-800 pb-20">
@@ -368,15 +436,12 @@ export default function WingDashboard() {
               const wd = dt.toLocaleDateString("fr-FR", { weekday: "narrow" });
               const day = dt.getDate();
               const isSel = d === selDate;
-              const ph = PHASES[d];
-              const phColor = ph === "crozon" ? "bg-teal-500" : ph === "nord" ? "bg-blue-500" : "bg-slate-300";
               return (
                 <button key={d} onClick={() => { setSelDate(d); setDetail(null); }}
                   className={`flex flex-col items-center px-2 py-1 rounded-xl min-w-[40px] transition-all
                     ${isSel ? "bg-slate-800 text-white shadow-lg scale-105" : "hover:bg-slate-100"}`}>
                   <span className={`text-[10px] ${isSel?"text-slate-300":"text-slate-400"}`}>{wd}</span>
                   <span className={`text-sm font-bold ${isSel?"":"text-slate-700"}`}>{day}</span>
-                  <div className={`w-1.5 h-1.5 rounded-full mt-0.5 ${isSel?"bg-white":phColor}`}/>
                 </button>
               );
             })}
@@ -392,11 +457,9 @@ export default function WingDashboard() {
           </button>
           <div className="text-center">
             <div className="font-bold text-base capitalize">{dayLabel}</div>
-            <div className="flex items-center justify-center gap-3 text-xs text-slate-500 mt-0.5">
-              <span className={`px-2 py-0.5 rounded-full text-white text-[10px] font-semibold ${
-                phase==="crozon"?"bg-teal-500":phase==="nord"?"bg-blue-500":"bg-slate-400"
-              }`}>{phase==="crozon"?"CROZON":phase==="nord"?"FINISTÈRE NORD":"TRANSIT"}</span>
+            <div className="flex items-center justify-center gap-2 text-xs text-slate-500 mt-0.5">
               <span>Coeff {dayCoeff[0]}/{dayCoeff[1]}</span>
+              {dayModel && <span className="text-[10px] text-slate-400">· {dayModel}</span>}
             </div>
           </div>
           <button onClick={nextDate} className="p-1.5 rounded-lg hover:bg-slate-200 text-slate-400">
@@ -458,66 +521,17 @@ export default function WingDashboard() {
               </div>
             </div>
 
-            {/* SPOT ROWS - ACTIVE ZONE */}
-            {spotRows.map(spot => {
-              const dayScores = scores[selDate]?.[spot.id] || [];
-              return (
-                <div key={spot.id} className="flex items-center mb-1 group">
-                  <div className="w-20 shrink-0 pr-2 text-right">
-                    <div className="text-[11px] font-semibold text-slate-700 leading-tight truncate">{spot.name}</div>
-                    <div className="text-[9px] text-slate-400">
-                      {spot.type==="wave"?"🌊":spot.type==="flat"?"🟦":"🏖"}
-                      {spot.tideRule==="pm"?" PM":spot.tideRule==="bm"?" BM":""}
-                    </div>
-                  </div>
-                  <div className="flex-1 flex gap-px">
-                    {dayScores.map((s, i) => (
-                      <button key={i}
-                        onClick={() => setDetail({ score: s, spot, hour: HOURS[i], tide: s.tide })}
-                        className={`flex-1 h-7 rounded-sm transition-all cursor-pointer
-                          ${cellColor(s)} ${cellBorder(s)}
-                          hover:scale-y-125 hover:z-10 relative`}
-                        title={`${HOURS[i]}h: ${s.kts} kts ${s.dir}`}>
-                        {s.level === 2 && (
-                          <span className="text-[8px] font-bold text-emerald-800 absolute inset-0 flex items-center justify-center">
-                            {s.kts}
-                          </span>
-                        )}
-                        {s.level === 1 && (
-                          <span className="text-[8px] font-medium text-amber-700 absolute inset-0 flex items-center justify-center">
-                            {s.kts}
-                          </span>
-                        )}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              );
-            })}
+            {/* CROZON */}
+            <div className="text-[10px] text-teal-600 mb-1 uppercase tracking-wider font-semibold">Presqu'île de Crozon</div>
+            {CROZON_SPOTS.map(spot => (
+              <SpotRow key={spot.id} spot={spot} dayScores={scores[selDate]?.[spot.id] || []} onCellClick={handleCellClick}/>
+            ))}
 
-            {/* OTHER ZONE (dimmed) */}
-            {otherSpots.length > 0 && (
-              <>
-                <div className="text-[10px] text-slate-400 mt-3 mb-1 uppercase tracking-wider font-medium">
-                  {phase==="crozon" ? "Finistère Nord (à venir)" : "Crozon (passé)"}
-                </div>
-                {otherSpots.map(spot => {
-                  const dayScores = scores[selDate]?.[spot.id] || [];
-                  return (
-                    <div key={spot.id} className="flex items-center mb-1 opacity-40">
-                      <div className="w-20 shrink-0 pr-2 text-right">
-                        <div className="text-[11px] font-medium text-slate-500 leading-tight truncate">{spot.name}</div>
-                      </div>
-                      <div className="flex-1 flex gap-px">
-                        {dayScores.map((s, i) => (
-                          <div key={i} className={`flex-1 h-4 rounded-sm ${cellColor(s)}`}/>
-                        ))}
-                      </div>
-                    </div>
-                  );
-                })}
-              </>
-            )}
+            {/* FINISTÈRE NORD */}
+            <div className="text-[10px] text-blue-600 mt-3 mb-1 uppercase tracking-wider font-semibold">Finistère Nord</div>
+            {NORD_SPOTS.map(spot => (
+              <SpotRow key={spot.id} spot={spot} dayScores={scores[selDate]?.[spot.id] || []} onCellClick={handleCellClick}/>
+            ))}
 
             {/* TIDE CURVE */}
             <div className="mt-3 bg-white rounded-xl border border-slate-200 px-3 py-2">
@@ -528,14 +542,23 @@ export default function WingDashboard() {
               <TideCurve dateStr={selDate}/>
             </div>
 
-            {/* LEGEND */}
-            <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-slate-500 pb-4">
+            {/* LEGEND — COLORS */}
+            <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-slate-500">
               <div className="flex items-center gap-1"><div className="w-3 h-3 rounded-sm bg-emerald-400"/> GO (≥12 kts)</div>
-              <div className="flex items-center gap-1"><div className="w-3 h-3 rounded-sm bg-amber-300"/> 8-11 kts</div>
+              <div className="flex items-center gap-1"><div className="w-3 h-3 rounded-sm bg-amber-300"/> 8–11 kts</div>
               <div className="flex items-center gap-1"><div className="w-3 h-3 rounded-sm bg-sky-200"/> Marée ✗</div>
               <div className="flex items-center gap-1"><div className="w-3 h-3 rounded-sm bg-orange-200"/> Direction ✗</div>
               <div className="flex items-center gap-1"><div className="w-3 h-3 rounded-sm bg-slate-100"/> &lt;8 kts</div>
               <div className="flex items-center gap-1"><div className="w-3 h-3 rounded-sm bg-red-300"/> &gt;30 kts</div>
+            </div>
+
+            {/* LEGEND — SPOT SYMBOLS */}
+            <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-slate-500 pb-4">
+              <div className="flex items-center gap-1">🌊 Vague / reef</div>
+              <div className="flex items-center gap-1">🟦 Flat water</div>
+              <div className="flex items-center gap-1">🏖 Mixte</div>
+              <div className="flex items-center gap-1"><span className="font-semibold">PM</span> Mi-montante → pleine mer</div>
+              <div className="flex items-center gap-1"><span className="font-semibold">BM</span> Basse mer → mi-marée</div>
             </div>
           </>
         )}
